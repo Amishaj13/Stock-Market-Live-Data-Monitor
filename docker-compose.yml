@@ -1,0 +1,197 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: stock-postgres
+    environment:
+      POSTGRES_USER: stockuser
+      POSTGRES_PASSWORD: stockpass123
+      POSTGRES_DB: stockdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - stock-network
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U stockuser" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: stock-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - stock-network
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # RabbitMQ Message Broker
+  rabbitmq:
+    image: rabbitmq:3.12-management-alpine
+    container_name: stock-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: stockuser
+      RABBITMQ_DEFAULT_PASS: stockpass123
+    ports:
+      - "5672:5672" # AMQP port
+      - "15672:15672" # Management UI
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    networks:
+      - stock-network
+    healthcheck:
+      test: [ "CMD", "rabbitmq-diagnostics", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # User & Watchlist Service
+  user-service:
+    build:
+      context: ./backend/user-service
+      dockerfile: Dockerfile
+    container_name: stock-user-service
+    environment:
+      FLASK_ENV: development
+      DATABASE_URL: postgresql://stockuser:stockpass123@postgres:5432/stockdb
+      JWT_SECRET_KEY: your-secret-key-change-in-production
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "5004:5004"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - stock-network
+    restart: unless-stopped
+
+  # Stock Fetcher Service
+  stock-fetcher:
+    build:
+      context: ./backend/stock-fetcher-service
+      dockerfile: Dockerfile
+    container_name: stock-fetcher
+    environment:
+      FLASK_ENV: development
+      RABBITMQ_URL: amqp://stockuser:stockpass123@rabbitmq:5672/
+      FETCH_INTERVAL: 30
+    ports:
+      - "5001:5001"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - stock-network
+    restart: unless-stopped
+
+  # Stock Processor Service
+  stock-processor:
+    build:
+      context: ./backend/stock-processor-service
+      dockerfile: Dockerfile
+    container_name: stock-processor
+    environment:
+      FLASK_ENV: development
+      RABBITMQ_URL: amqp://stockuser:stockpass123@rabbitmq:5672/
+      DATABASE_URL: postgresql://stockuser:stockpass123@postgres:5432/stockdb
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "5002:5002"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - stock-network
+    restart: unless-stopped
+
+  # Alert Service
+  alert-service:
+    build:
+      context: ./backend/alert-service
+      dockerfile: Dockerfile
+    container_name: stock-alert-service
+    environment:
+      FLASK_ENV: development
+      RABBITMQ_URL: amqp://stockuser:stockpass123@rabbitmq:5672/
+      DATABASE_URL: postgresql://stockuser:stockpass123@postgres:5432/stockdb
+      REDIS_URL: redis://redis:6379/0
+    ports:
+      - "5003:5003"
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - stock-network
+    restart: unless-stopped
+
+  # API Gateway
+  api-gateway:
+    build:
+      context: ./backend/api-gateway
+      dockerfile: Dockerfile
+    container_name: stock-api-gateway
+    environment:
+      FLASK_ENV: development
+      USER_SERVICE_URL: http://user-service:5004
+      STOCK_PROCESSOR_URL: http://stock-processor:5002
+      ALERT_SERVICE_URL: http://alert-service:5003
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET_KEY: your-secret-key-change-in-production
+    ports:
+      - "5000:5000"
+    depends_on:
+      - user-service
+      - stock-processor
+      - alert-service
+      - redis
+    networks:
+      - stock-network
+    restart: unless-stopped
+
+  # Frontend React App
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: stock-frontend
+    environment:
+      REACT_APP_API_URL: http://localhost:5000
+      REACT_APP_WS_URL: ws://localhost:5000
+    ports:
+      - "3000:80"
+    depends_on:
+      - api-gateway
+    networks:
+      - stock-network
+    restart: unless-stopped
+
+networks:
+  stock-network:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  redis-data:
+  rabbitmq-data:
